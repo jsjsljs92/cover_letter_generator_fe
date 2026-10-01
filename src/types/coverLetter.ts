@@ -32,17 +32,24 @@ export interface CreateCoverLetterResponse {
   message?: string;
 }
 
+export interface ValidationVerdict {
+  valid: boolean;
+  unsupported_claims?: string[];
+  issues?: string[];
+}
+
 export interface GetCoverLetterResponse {
   id: number | string;
   status: BackendStatus;
+  /** Present only once status is 'completed'. */
   cover_letter?: string;
-  content?: string;
-  text?: string;
-  letter?: string;
-  job_title?: string;
-  company_name?: string;
+  /** Server-computed PDF path, present once generation completed. */
+  pdf_url?: string;
+  candidate_name?: string;
   created_at?: string;
+  /** Client-safe failure explanation, present only when status is 'failed'. */
   error?: string;
+  validation?: ValidationVerdict;
 }
 
 export interface ProgressStep {
@@ -56,8 +63,10 @@ export interface GeneratedCoverLetter {
   content: string;
   tone: ToneOption;
   createdAt: string;
-  jobTitle?: string;
-  companyName?: string;
+  /** Name the model attributed the letter to, when it inferred one. */
+  candidateName?: string;
+  /** Server-reported path to the generated PDF, when available. */
+  pdfUrl?: string;
   sourceType: JobInputMode;
   sourceValue: string;
   resumeFileName: string;

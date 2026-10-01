@@ -12,6 +12,76 @@ interface ResumeUploaderProps {
 
 const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB
 
+/**
+ * Builds a small but genuinely valid PDF with an extractable text layer.
+ *
+ * It exists so "Use sample resume" produces a file the backend's parser can
+ * actually read. A hand-written stub passes the `%PDF-` magic check but
+ * extracts no text, and the server rejects it as an image-only PDF.
+ *
+ * The xref table stores byte offsets, so the object bodies are assembled first
+ * and their lengths measured; writing a fixed table would produce a file that
+ * most readers reject.
+ */
+function buildSampleResumePdf(): Blob {
+  const lines = [
+    'Jia Sheng',
+    'Senior Software Engineer',
+    'SUMMARY',
+    'Senior engineer with eight years building distributed web platforms and',
+    'design systems. Focused on TypeScript, React, and API design.',
+    'EXPERIENCE',
+    'Staff Engineer, Northwind Systems (2021 - present)',
+    'Led the migration of a monolithic dashboard to a typed component platform',
+    'serving 40k daily users, cutting bundle size by 38 percent.',
+    'Designed the public REST and GraphQL API layer adopted by four teams.',
+    'Software Engineer, Contoso (2018 - 2021)',
+    'Built an accessibility review pipeline now run on every release.',
+    'SKILLS',
+    'TypeScript, React, Go, PostgreSQL, Kubernetes, accessibility, performance.',
+  ];
+
+  // One BT/ET block per line, positioned down the page. Separate text-showing
+  // operators land on distinct lines in the extracted text.
+  const textOps = lines
+    .map((line, i) => `BT /F1 11 Tf 1 0 0 1 60 ${740 - i * 30} Tm (${escapePdfText(line)}) Tj ET`)
+    .join('\n');
+  const contentStream = `${textOps}\n`;
+
+  const objects = [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>',
+    // /Length is a byte count. String.length counts UTF-16 units, which only
+    // matches because every character written here is ASCII.
+    `<< /Length ${contentStream.length} >>\nstream\n${contentStream}endstream`,
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+  ];
+
+  // Byte offsets for the xref table. Also ASCII-only, so string length is the
+  // byte offset.
+  let pdf = '%PDF-1.4\n';
+  const offsets: number[] = [];
+  objects.forEach((body, i) => {
+    offsets.push(pdf.length);
+    pdf += `${i + 1} 0 obj\n${body}\nendobj\n`;
+  });
+
+  const xrefStart = pdf.length;
+  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  for (const offset of offsets) {
+    pdf += `${String(offset).padStart(10, '0')} 00000 n \n`;
+  }
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefStart}\n%%EOF\n`;
+
+  return new Blob([pdf], { type: 'application/pdf' });
+}
+
+/** Escapes the three characters that are structural inside a PDF literal string. */
+function escapePdfText(text: string): string {
+  return text.replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)');
+}
+
 export const ResumeUploader: React.FC<ResumeUploaderProps> = ({
   file,
   onFileSelect,
@@ -94,10 +164,10 @@ export const ResumeUploader: React.FC<ResumeUploaderProps> = ({
   };
 
   const handleUseSampleResume = () => {
-    // Generate a minimal valid dummy PDF file for instant testing
-    const samplePdfContent = `%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Count 1/Kids[3 0 R]>>endobj\n3 0 obj<</Type/Page/MediaBox[0 0 612 792]/Parent 2 0 R/Resources<<>>>>endobj\nxref\n0 4\n0000000000 65535 f \n0000000010 00000 n \n0000000060 00000 n \n0000000117 00000 n \ntrailer<</Size 4/Root 1 0 R>>\nstartxref\n190\n%%EOF`;
-    const blob = new Blob([samplePdfContent], { type: 'application/pdf' });
-    const sampleFile = new File([blob], 'Jia_Sheng_Senior_Engineer_Resume.pdf', {
+    // A stub with no text layer is rejected by the backend: the PDF parser
+    // extracts text and refuses anything under its minimum readable length, so
+    // the sample must carry a real text-drawing operator stream.
+    const sampleFile = new File([buildSampleResumePdf()], 'Jia_Sheng_Senior_Engineer_Resume.pdf', {
       type: 'application/pdf',
       lastModified: Date.now(),
     });

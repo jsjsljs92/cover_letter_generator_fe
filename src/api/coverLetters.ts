@@ -30,13 +30,61 @@ export function setApiBaseUrlOverride(url: string | null): void {
 export class ApiError extends Error {
   status?: number;
   isNetworkError: boolean;
+  /** Machine-readable code from the backend envelope, e.g. INVALID_JOB_INPUT. */
+  code?: string;
+  /** Correlation id, which an operator can use to find the full server-side error. */
+  requestId?: string;
 
-  constructor(message: string, status?: number, isNetworkError: boolean = false) {
+  constructor(
+    message: string,
+    status?: number,
+    isNetworkError: boolean = false,
+    code?: string,
+    requestId?: string
+  ) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.isNetworkError = isNetworkError;
+    this.code = code;
+    this.requestId = requestId;
   }
+}
+
+/**
+ * The backend's error envelope: {"error":{"code","message","request_id"}}.
+ *
+ * The message is nested one level down, so reading a top-level `message` (or
+ * passing the `error` object to `new Error`) yields "[object Object]". This
+ * unwraps the shape and falls back to the status line when the body is not the
+ * expected envelope — a proxy or gateway may answer with HTML.
+ */
+async function extractError(response: Response): Promise<ApiError> {
+  const fallback = `Server responded with status ${response.status}${
+    response.statusText ? ` ${response.statusText}` : ''
+  }`;
+
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    return new ApiError(fallback, response.status);
+  }
+
+  const detail = (payload as { error?: { message?: string; code?: string; request_id?: string } })
+    ?.error;
+
+  if (detail && typeof detail === 'object' && typeof detail.message === 'string') {
+    return new ApiError(
+      detail.message,
+      response.status,
+      false,
+      detail.code,
+      detail.request_id
+    );
+  }
+
+  return new ApiError(fallback, response.status);
 }
 
 export interface CreateCoverLetterParams {
@@ -72,26 +120,16 @@ export async function createCoverLetter(params: CreateCoverLetterParams): Promis
     });
 
     if (!response.ok) {
-      let errorMsg = `Server responded with status ${response.status}`;
-      try {
-        const errJson = await response.json();
-        if (errJson && (errJson.message || errJson.error)) {
-          errorMsg = errJson.message || errJson.error;
-        }
-      } catch {
-        // Fall back to status text
-        if (response.statusText) {
-          errorMsg = response.statusText;
-        }
-      }
-      throw new ApiError(errorMsg, response.status, false);
+      throw await extractError(response);
     }
 
     const data = await response.json();
     return {
       id: data.id,
       status: data.status || 'processing',
-      message: data.message,
+      // The API returns 202 with the record; there is no human-readable message
+      // field, so derive one from the status the backend assigned.
+      message: `Request accepted (${data.status || 'processing'})`,
     };
   } catch (err: unknown) {
     if (err instanceof ApiError) {
@@ -121,29 +159,22 @@ export async function getCoverLetter(id: number | string): Promise<GetCoverLette
     });
 
     if (!response.ok) {
-      let errorMsg = `Server responded with status ${response.status}`;
-      try {
-        const errJson = await response.json();
-        if (errJson && (errJson.message || errJson.error)) {
-          errorMsg = errJson.message || errJson.error;
-        }
-      } catch {
-        if (response.statusText) {
-          errorMsg = response.statusText;
-        }
-      }
-      throw new ApiError(errorMsg, response.status, false);
+      throw await extractError(response);
     }
 
     const data = await response.json();
     return {
       id: data.id ?? id,
       status: data.status,
-      cover_letter: data.cover_letter || data.content || data.text || data.letter || '',
-      job_title: data.job_title,
-      company_name: data.company_name,
+      cover_letter: data.cover_letter || '',
+      // The backend exposes the candidate name it attributed the letter to; it
+      // has no notion of a job title or company, so those are not sent.
+      candidate_name: data.candidate_name,
+      pdf_url: data.pdf_url,
       created_at: data.created_at,
-      error: data.error,
+      // A failed record carries a client-safe explanation in `error_message`.
+      error: data.error_message,
+      validation: data.validation,
     };
   } catch (err: unknown) {
     if (err instanceof ApiError) {
@@ -181,10 +212,15 @@ export async function downloadCoverLetterPdf(
     });
 
     if (!response.ok) {
+      // Reuse the envelope reader so a failed download reports the server's
+      // message rather than a bare status line.
+      const err = await extractError(response);
       throw new ApiError(
-        `Failed to download PDF (${response.status} ${response.statusText})`,
-        response.status,
-        false
+        `Failed to download PDF: ${err.message}`,
+        err.status,
+        false,
+        err.code,
+        err.requestId
       );
     }
 

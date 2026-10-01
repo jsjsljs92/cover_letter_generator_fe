@@ -124,7 +124,11 @@ export function useCoverLetterGenerator() {
         setElapsedSeconds(Math.floor((Date.now() - startTime) / 1000));
       }, 500);
 
-      const maxAttempts = 60; // 60 attempts * 1.5s = 90s max
+      // The backend bounds a generation at GENERATION_TIMEOUT (5 minutes by
+      // default) across resume extraction, several Gemini calls and PDF
+      // rendering. Polling must outlast that, or a slow-but-successful job is
+      // reported to the user as a failure.
+      const maxAttempts = 240; // 240 attempts * 1.5s = 6 min
       let attempts = 0;
 
       while (activePollingRef.current && attempts < maxAttempts) {
@@ -168,20 +172,15 @@ export function useCoverLetterGenerator() {
               { id: 'preparing_pdf', label: 'Preparing PDF', status: 'done' },
             ]);
 
-            const letterContent =
-              response.cover_letter ||
-              response.content ||
-              response.text ||
-              response.letter ||
-              getDefaultFallbackContent(tone);
+            const letterContent = response.cover_letter || getDefaultFallbackContent(tone);
 
             setGeneratedLetter({
               id: response.id,
               content: letterContent,
               tone,
               createdAt: response.created_at || new Date().toISOString(),
-              jobTitle: response.job_title,
-              companyName: response.company_name,
+              candidateName: response.candidate_name,
+              pdfUrl: response.pdf_url,
               sourceType: formData.inputMode,
               sourceValue: formData.inputMode === 'url' ? formData.jobUrl : formData.jobDescription,
               resumeFileName: resumeName,
@@ -199,7 +198,7 @@ export function useCoverLetterGenerator() {
 
           const isConn = (err instanceof ApiError && err.isNetworkError) || (err instanceof TypeError);
           setIsConnectionError(isConn);
-          setErrorMessage((err as Error).message || 'Server error while checking status.');
+          setErrorMessage(describeError(err, 'Server error while checking status.'));
           setGenerationState('failed');
           return;
         }
@@ -209,7 +208,10 @@ export function useCoverLetterGenerator() {
       if (activePollingRef.current) {
         if (timerRef.current) clearInterval(timerRef.current);
         activePollingRef.current = false;
-        setErrorMessage('Generation timed out. The server took too long to complete.');
+        setErrorMessage(
+          `Generation timed out after ${Math.round((maxAttempts * 1500) / 1000)}s. ` +
+            'The job may still finish on the server.'
+        );
         setGenerationState('failed');
       }
     },
@@ -251,7 +253,7 @@ export function useCoverLetterGenerator() {
     } catch (err: unknown) {
       const isConn = (err instanceof ApiError && err.isNetworkError) || (err instanceof TypeError);
       setIsConnectionError(isConn);
-      setErrorMessage((err as Error).message || 'Failed to submit generation request.');
+      setErrorMessage(describeError(err, 'Failed to submit generation request.'));
       setGenerationState('failed');
     }
   };
@@ -321,8 +323,7 @@ export function useCoverLetterGenerator() {
       content: getDefaultFallbackContent(formData.tone),
       tone: formData.tone,
       createdAt: new Date().toISOString(),
-      jobTitle: 'Senior Software Engineer',
-      companyName: 'Hiring Team',
+      candidateName: 'Jia Sheng',
       sourceType: formData.inputMode,
       sourceValue: formData.inputMode === 'url' ? formData.jobUrl : formData.jobDescription,
       resumeFileName: formData.resumeFile.name,
@@ -381,6 +382,21 @@ export function useCoverLetterGenerator() {
     handleEditInputs,
     setResumeError: (err?: string) => setErrors((prev) => ({ ...prev, resumeFile: err })),
   };
+}
+
+/**
+ * Builds the user-facing failure text.
+ *
+ * When the backend supplied a correlation id it is appended, so a user can
+ * quote one identifier and an operator can find the full internal error in the
+ * logs — the API deliberately returns only a client-safe message.
+ */
+function describeError(err: unknown, fallback: string): string {
+  const message = (err as Error)?.message || fallback;
+  if (err instanceof ApiError && err.requestId) {
+    return `${message} (request id: ${err.requestId})`;
+  }
+  return message;
 }
 
 function getDefaultFallbackContent(tone: ToneOption): string {
