@@ -1,0 +1,6 @@
+{
+  "name": "AI Cover Letter",
+  "description": "Create a tailored cover letter from your resume and a job description.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
